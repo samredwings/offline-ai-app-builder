@@ -187,6 +187,34 @@ export const classifyAndGenerate = createServerFn({ method: "POST" })
     return { projectId, slug };
   });
 
+const SYSTEM_CHAT = `You are the AI co-builder of a small mobile web app. You converse naturally with the creator AND can rebuild the app when they ask for changes.
+
+For every user message, return ONE tool call deciding what to do:
+- mode="chat": questions, brainstorming, status, clarifications. Write a short, friendly reply (1–4 sentences). Do NOT change the app.
+- mode="edit": user is asking for an actual change to the app (add/remove/rename tabs, change behavior, content, theme, etc.). Write a short reply describing what you're going to change (1–3 sentences) and put the actionable instruction in edit_instruction.
+
+Use the conversation history for context. Be concise and friendly. Reference the user's prior messages when helpful.`;
+
+const TOOL_CHAT_ROUTE = {
+  type: "function" as const,
+  function: {
+    name: "emit_response",
+    description: "Decide whether to chat or edit the app, and write the assistant reply.",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["chat", "edit"] },
+        reply: { type: "string", description: "Assistant message to show in chat (1–4 sentences)." },
+        edit_instruction: {
+          type: "string",
+          description: "Required when mode='edit'. Self-contained instruction to apply to the app spec.",
+        },
+      },
+      required: ["mode", "reply"],
+    },
+  },
+};
+
 export const refineProject = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) =>
@@ -210,8 +238,48 @@ export const refineProject = createServerFn({ method: "POST" })
       .single();
     if (!current) throw new Error("No current version");
 
+    // Load recent conversation for context.
+    const { data: history } = await supabaseAdmin
+      .from("project_messages")
+      .select("role, content")
+      .eq("project_id", data.projectId)
+      .order("created_at", { ascending: true })
+      .limit(20);
 
-    const messages = [
+    const appSummary = `Current app: "${project.title}" with ${(current.tabs as { name: string }[]).length} tab(s): ${
+      (current.tabs as { name: string }[]).map((t) => t.name).join(", ")
+    }.`;
+
+    const routeMessages = [
+      { role: "system" as const, content: `${SYSTEM_CHAT}\n\n${appSummary}` },
+      ...((history ?? []).map((m) => ({
+        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+        content: m.content,
+      }))),
+      { role: "user" as const, content: data.message },
+    ];
+
+    const decision = await callAIWithTool<{
+      mode: "chat" | "edit";
+      reply: string;
+      edit_instruction?: string;
+    }>({
+      model: "google/gemini-3-flash-preview",
+      messages: routeMessages,
+      tool: TOOL_CHAT_ROUTE,
+    });
+
+    // CHAT mode: just store the exchange and return.
+    if (decision.mode === "chat" || !decision.edit_instruction) {
+      await supabaseAdmin.from("project_messages").insert([
+        { project_id: data.projectId, role: "user", content: data.message },
+        { project_id: data.projectId, role: "assistant", content: decision.reply },
+      ]);
+      return { mode: "chat" as const };
+    }
+
+    // EDIT mode: regenerate spec using the instruction + conversation context.
+    const editMessages = [
       { role: "system" as const, content: SYSTEM_GENERATE },
       {
         role: "user" as const,
@@ -219,12 +287,15 @@ export const refineProject = createServerFn({ method: "POST" })
           title: project.title,
           theme: project.theme,
           tabs: current.tabs,
-        })}\n\nUser refinement: ${data.message}\n\nReturn a complete new app spec applying the refinement. Keep prior content unless the user asked to change it.`,
+        })}\n\nRecent conversation:\n${(history ?? [])
+          .slice(-8)
+          .map((m) => `${m.role}: ${m.content}`)
+          .join("\n")}\n\nUser refinement: ${decision.edit_instruction}\n\nReturn a complete new app spec applying the refinement. Keep prior content unless the user asked to change it.`,
       },
     ];
     let spec = await callAIWithTool<AppSpec>({
       model: "google/gemini-3-flash-preview",
-      messages,
+      messages: editMessages,
       tool: TOOL_GENERATE,
     });
     const errs = validateSpec(spec);
@@ -232,7 +303,7 @@ export const refineProject = createServerFn({ method: "POST" })
       spec = await callAIWithTool<AppSpec>({
         model: "google/gemini-3-flash-preview",
         messages: [
-          ...messages,
+          ...editMessages,
           { role: "user", content: `Validation failed:\n${errs.join("\n")}\nFix and return again.` },
         ],
         tool: TOOL_GENERATE,
@@ -266,13 +337,14 @@ export const refineProject = createServerFn({ method: "POST" })
       {
         project_id: data.projectId,
         role: "assistant",
-        content: `Updated. Now ${spec.tabs.length} tabs.`,
+        content: decision.reply,
         version_id_after: v.id,
       },
     ]);
 
-    return { versionId: v.id };
+    return { mode: "edit" as const, versionId: v.id };
   });
+
 
 export const revertToVersion = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])

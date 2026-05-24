@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getProject } from "@/lib/projects.functions";
 import {
   refineProject,
@@ -52,11 +52,16 @@ function Editor() {
   });
 
   const [chatInput, setChatInput] = useState("");
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
 
   const refineMut = useMutation({
     mutationFn: (message: string) => refine({ data: { projectId: id, message } }),
-    onSuccess: () => {
-      toast.success("Updated");
+    onSuccess: (res) => {
+      if (res?.mode === "edit") toast.success("App updated");
       setChatInput("");
       refetch();
     },
@@ -231,11 +236,14 @@ function Editor() {
             </TabsList>
 
             <TabsContent value="chat" className="space-y-3">
-              <div className="h-[420px] overflow-y-auto rounded-lg border p-3 space-y-2">
+              <div
+                ref={chatScrollRef}
+                className="h-[420px] overflow-y-auto rounded-lg border p-3 space-y-2"
+              >
                 {data.messages.length === 0 ? (
                   <p className="text-xs text-muted-foreground">
-                    Try: "add a stats tab", "use a darker theme", "remember my entries between
-                    sessions"
+                    Chat with the AI. Ask questions, brainstorm, or request changes like
+                    "add a stats tab", "use a darker theme", or "remember entries between sessions".
                   </p>
                 ) : (
                   data.messages.map((m) => (
@@ -243,8 +251,8 @@ function Editor() {
                       key={m.id}
                       className={
                         m.role === "user"
-                          ? "ml-8 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
-                          : "mr-8 rounded-lg bg-muted px-3 py-2 text-sm"
+                          ? "ml-8 whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
+                          : "mr-8 whitespace-pre-wrap rounded-lg bg-muted px-3 py-2 text-sm"
                       }
                     >
                       {m.content}
@@ -253,7 +261,7 @@ function Editor() {
                 )}
                 {refineMut.isPending && (
                   <div className="mr-8 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-                    Updating your app…
+                    Thinking…
                   </div>
                 )}
               </div>
@@ -261,7 +269,14 @@ function Editor() {
                 rows={3}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Describe a change…"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    const v = chatInput.trim();
+                    if (v && !refineMut.isPending) refineMut.mutate(v);
+                  }
+                }}
+                placeholder="Ask a question or describe a change… (Enter to send, Shift+Enter for newline)"
                 disabled={refineMut.isPending}
               />
               <Button
@@ -272,6 +287,7 @@ function Editor() {
                 {refineMut.isPending ? "Working…" : "Send"}
               </Button>
             </TabsContent>
+
 
             <TabsContent value="design" className="space-y-4">
               {(["primary", "background", "foreground", "accent"] as const).map((k) => (
