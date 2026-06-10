@@ -359,6 +359,13 @@ export const revertToVersion = createServerFn({ method: "POST" })
       .eq("id", data.projectId)
       .single();
     if (!project || project.owner_id !== userId) throw new Error("Not found");
+    const { data: ver } = await supabaseAdmin
+      .from("project_versions")
+      .select("id")
+      .eq("id", data.versionId)
+      .eq("project_id", data.projectId)
+      .maybeSingle();
+    if (!ver) throw new Error("Version not found");
     await supabaseAdmin
       .from("projects")
       .update({ current_version_id: data.versionId })

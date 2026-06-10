@@ -21,6 +21,7 @@ const loadApp = createServerFn({ method: "GET" })
       .from("project_versions")
       .select("tabs")
       .eq("id", project.current_version_id)
+      .eq("project_id", project.id)
       .maybeSingle();
 
     const tabs = (version?.tabs ?? []) as Tab[];
