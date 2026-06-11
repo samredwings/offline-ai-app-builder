@@ -8,6 +8,7 @@ import {
   revertToVersion,
   updateProjectMeta,
   regenerateIcon,
+  uploadCustomIcon,
 } from "@/lib/generate.functions";
 import { updateAIRuntime, exportAPKBundle } from "@/lib/export.functions";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { PreviewIframe } from "@/components/PreviewIframe";
 import { ThemeEditor } from "@/components/theme-editor";
+import { IconUploader } from "@/components/icon-uploader";
 import { renderAppHTML } from "@/lib/app-runtime";
 import type { Theme, AIRuntime } from "@/lib/types";
 
@@ -89,6 +91,25 @@ function Editor() {
       refetch();
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+  });
+
+  const uploadIcon = useServerFn(uploadCustomIcon);
+  const uploadIconMut = useMutation({
+    mutationFn: async (blob: Blob) => {
+      const buf = await blob.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+      return uploadIcon({
+        data: { projectId: id, base64, contentType: (blob.type || "image/png") as "image/png" },
+      });
+    },
+    onSuccess: () => {
+      toast.success("Icon updated");
+      refetch();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Upload failed"),
   });
 
   const updateAI = useServerFn(updateAIRuntime);
@@ -317,6 +338,14 @@ function Editor() {
                     {regenMut.isPending ? "…" : "Re-roll"}
                   </Button>
                 </div>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t">
+                <Label>Upload custom icon</Label>
+                <IconUploader
+                  saving={uploadIconMut.isPending}
+                  onSave={(blob) => uploadIconMut.mutate(blob)}
+                />
               </div>
             </TabsContent>
 

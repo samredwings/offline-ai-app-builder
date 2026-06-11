@@ -430,3 +430,44 @@ export const regenerateIcon = createServerFn({ method: "POST" })
     await supabaseAdmin.from("projects").update({ icon_url: url }).eq("id", data.projectId);
     return { iconUrl: url };
   });
+
+export const uploadCustomIcon = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        projectId: z.string().uuid(),
+        base64: z.string().min(10).max(10_000_000),
+        contentType: z.string().regex(/^image\/(png|jpeg|webp)$/).default("image/png"),
+      })
+      .parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    const { data: project } = await supabaseAdmin
+      .from("projects")
+      .select("owner_id")
+      .eq("id", data.projectId)
+      .single();
+    if (!project || project.owner_id !== userId) throw new Error("Not found");
+
+    const ext = data.contentType === "image/jpeg" ? "jpg" : data.contentType === "image/webp" ? "webp" : "png";
+    const path = `${userId}/${data.projectId}/${Date.now()}.${ext}`;
+    const bytes = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0));
+
+    const { error: upErr } = await supabaseAdmin.storage
+      .from("app-icons")
+      .upload(path, bytes, { contentType: data.contentType, upsert: false });
+    if (upErr) throw new Error(upErr.message);
+
+    const { data: pub } = supabaseAdmin.storage.from("app-icons").getPublicUrl(path);
+    const iconUrl = pub.publicUrl;
+
+    const { error: updErr } = await supabaseAdmin
+      .from("projects")
+      .update({ icon_url: iconUrl })
+      .eq("id", data.projectId);
+    if (updErr) throw new Error(updErr.message);
+
+    return { iconUrl };
+  });
