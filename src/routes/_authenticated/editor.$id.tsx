@@ -524,5 +524,4 @@ function Editor() {
       </main>
     </div>
   );
-  );
 }
