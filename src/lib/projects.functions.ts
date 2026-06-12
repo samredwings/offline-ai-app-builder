@@ -8,7 +8,7 @@ export const listMyProjects = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { data, error } = await supabaseAdmin
       .from("projects")
-      .select("id, slug, title, icon_url, theme, is_published, updated_at")
+      .select("id, slug, title, icon_url, theme, is_published, updated_at, created_at")
       .eq("owner_id", context.userId)
       .order("updated_at", { ascending: false });
     if (error) throw new Error(error.message);
