@@ -382,12 +382,13 @@ export const updateProjectMeta = createServerFn({ method: "POST" })
         title: z.string().min(1).max(60).optional(),
         theme: z
           .object({
-            primary: z.string(),
-            background: z.string(),
-            foreground: z.string(),
-            accent: z.string(),
+            primary: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
+            background: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
+            foreground: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
+            accent: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
           })
           .optional(),
+
         is_published: z.boolean().optional(),
       })
       .parse(input)
