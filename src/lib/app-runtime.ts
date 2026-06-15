@@ -11,7 +11,9 @@ export function renderAppHTML(opts: {
   appDataEndpoint: string;
   ai: AIConfig;
 }): string {
-  const { title, theme, iconUrl, tabs, manifestUrl, appDataEndpoint, ai } = opts;
+  const { title, theme: rawTheme, iconUrl, tabs, manifestUrl, appDataEndpoint, ai } = opts;
+  const theme = sanitizeTheme(rawTheme);
+
 
   const safeTabs = tabs.map((t, i) => ({
     name: t.name || `Tab ${i + 1}`,
