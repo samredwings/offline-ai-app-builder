@@ -1,15 +1,7 @@
-import { supabase } from "@/integrations/supabase/client";
-
-const SESSION_RETRY_DELAY_MS = 150;
+// Backward-compat shim. Old call sites imported getStableSession() from here.
+// In local mode we don't have a remote session — we just return whether the local gate is open.
+import { canEnter } from "./local-auth";
 
 export async function getStableSession() {
-  const first = await supabase.auth.getSession();
-  if (first.data.session) {
-    return first.data.session;
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, SESSION_RETRY_DELAY_MS));
-
-  const second = await supabase.auth.getSession();
-  return second.data.session ?? null;
+  return (await canEnter()) ? { ok: true } : null;
 }

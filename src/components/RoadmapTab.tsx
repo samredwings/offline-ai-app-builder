@@ -1,4 +1,3 @@
-import { useServerFn } from "@tanstack/react-start";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import {
@@ -46,15 +45,9 @@ const SOURCE_COLOR: Record<Req["source"], string> = {
 };
 
 export function RoadmapTab({ projectId }: { projectId: string }) {
-  const fetchRoadmap = useServerFn(getRoadmap);
-  const updateReq = useServerFn(updateRequirement);
-  const addReq = useServerFn(addRequirement);
-  const deleteReq = useServerFn(deleteRequirement);
-  const runTests = useServerFn(runStaticTests);
-
   const { data, refetch, isLoading } = useQuery({
     queryKey: ["roadmap", projectId],
-    queryFn: () => fetchRoadmap({ data: { projectId } }),
+    queryFn: () => getRoadmap({ data: { projectId } }),
     refetchInterval: 5000,
   });
 
@@ -62,12 +55,12 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
 
   const updateMut = useMutation({
     mutationFn: (input: { id: string; text?: string; status?: Req["status"] }) =>
-      updateReq({ data: input }),
+      updateRequirement({ data: input }),
     onSuccess: () => refetch(),
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
   });
   const addMut = useMutation({
-    mutationFn: (text: string) => addReq({ data: { projectId, text } }),
+    mutationFn: (text: string) => addRequirement({ data: { projectId, text } }),
     onSuccess: () => {
       setNewText("");
       refetch();
@@ -75,16 +68,16 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
   });
   const delMut = useMutation({
-    mutationFn: (id: string) => deleteReq({ data: { id } }),
+    mutationFn: (id: string) => deleteRequirement({ data: { id } }),
     onSuccess: () => refetch(),
   });
   const testMut = useMutation({
-    mutationFn: () => runTests({ data: { projectId } }),
+    mutationFn: () => runStaticTests({ data: { projectId } }),
     onSuccess: (res) => {
       toast.success(
         res.passed
           ? `Tests passed${res.issues.length > 0 ? ` (${res.issues.length} warnings)` : ""}`
-          : `${res.issues.length} issue(s) found`
+          : `${res.issues.length} issue(s) found`,
       );
       refetch();
     },
@@ -105,23 +98,16 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-4">
-      {/* Progress header */}
       <div className="rounded-lg border bg-card/30 p-3 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold">Build Progress</span>
-          <span className="text-xs text-muted-foreground">
-            {done}/{total} ({pct}%)
-          </span>
+          <span className="text-xs text-muted-foreground">{done}/{total} ({pct}%)</span>
         </div>
         <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-          <div
-            className="h-full bg-primary transition-all"
-            style={{ width: `${pct}%` }}
-          />
+          <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
         </div>
       </div>
 
-      {/* BRD list */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold">Requirements (BRD)</span>
@@ -134,25 +120,15 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
         ) : (
           <ul className="space-y-1.5">
             {reqs.map((r) => (
-              <li
-                key={r.id}
-                className="group flex items-start gap-2 rounded-md border bg-background/30 p-2 text-xs"
-              >
+              <li key={r.id} className="group flex items-start gap-2 rounded-md border bg-background/30 p-2 text-xs">
                 <Checkbox
                   className="mt-0.5 shrink-0"
                   checked={r.status === "done"}
-                  onCheckedChange={(v) =>
-                    updateMut.mutate({
-                      id: r.id,
-                      status: v ? "done" : "planned",
-                    })
-                  }
+                  onCheckedChange={(v) => updateMut.mutate({ id: r.id, status: v ? "done" : "planned" })}
                 />
                 <div className="min-w-0 flex-1">
                   <input
-                    className={`w-full bg-transparent outline-none ${
-                      r.status === "done" ? "line-through text-muted-foreground" : ""
-                    }`}
+                    className={`w-full bg-transparent outline-none ${r.status === "done" ? "line-through text-muted-foreground" : ""}`}
                     defaultValue={r.text}
                     onBlur={(e) => {
                       const v = e.target.value.trim();
@@ -160,19 +136,13 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
                     }}
                   />
                   <div className="mt-0.5 flex items-center gap-1.5">
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide ${SOURCE_COLOR[r.source]}`}
-                    >
+                    <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide ${SOURCE_COLOR[r.source]}`}>
                       {SOURCE_LABEL[r.source]}
                     </span>
                     {r.version_first_seen && (
-                      <span className="text-[9px] text-muted-foreground">
-                        v{r.version_first_seen}
-                      </span>
+                      <span className="text-[9px] text-muted-foreground">v{r.version_first_seen}</span>
                     )}
-                    {r.status === "changed" && (
-                      <span className="text-[9px] text-amber-600">scope changed</span>
-                    )}
+                    {r.status === "changed" && <span className="text-[9px] text-amber-600">scope changed</span>}
                   </div>
                 </div>
                 <button
@@ -187,7 +157,6 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
           </ul>
         )}
 
-        {/* Add manual */}
         <div className="flex gap-2 pt-1">
           <Input
             placeholder="Add a requirement…"
@@ -209,7 +178,6 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      {/* Tests */}
       <div className="space-y-2 pt-3 border-t">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold">Static Tests</span>
@@ -227,18 +195,12 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
         {latestStatic ? (
           <div className="rounded-lg border bg-background/30 p-2.5 text-xs space-y-2">
             <div className="flex items-center justify-between">
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                  latestStatic.passed
-                    ? "bg-green-500/10 text-green-700 dark:text-green-400"
-                    : "bg-red-500/10 text-red-700 dark:text-red-400"
-                }`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    latestStatic.passed ? "bg-green-500" : "bg-red-500"
-                  }`}
-                />
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                latestStatic.passed
+                  ? "bg-green-500/10 text-green-700 dark:text-green-400"
+                  : "bg-red-500/10 text-red-700 dark:text-red-400"
+              }`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${latestStatic.passed ? "bg-green-500" : "bg-red-500"}`} />
                 {latestStatic.passed ? "Passing" : "Failing"}
               </span>
               <span className="text-[10px] text-muted-foreground">
@@ -251,16 +213,11 @@ export function RoadmapTab({ projectId }: { projectId: string }) {
               <ul className="space-y-1">
                 {latestStatic.issues.map((iss, i) => (
                   <li key={i} className="flex gap-1.5 text-[11px]">
-                    <span
-                      className={`shrink-0 font-mono ${
-                        iss.severity === "error" ? "text-red-600" : "text-amber-600"
-                      }`}
-                    >
+                    <span className={`shrink-0 font-mono ${iss.severity === "error" ? "text-red-600" : "text-amber-600"}`}>
                       {iss.severity === "error" ? "✗" : "!"}
                     </span>
                     <span className="text-muted-foreground">
-                      <span className="font-medium text-foreground">[{iss.tab}]</span>{" "}
-                      {iss.message}
+                      <span className="font-medium text-foreground">[{iss.tab}]</span> {iss.message}
                     </span>
                   </li>
                 ))}

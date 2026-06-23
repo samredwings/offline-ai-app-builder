@@ -1,107 +1,64 @@
-import { createServerFn } from "@tanstack/react-start";
-import { z } from "zod";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { supabaseAdmin } from "@/integrations/supabase/client.server";
+// Project CRUD — now fully local (IndexedDB).
+// API shape kept compatible with the old server-fn callers: fn({ data: {...} }).
+import {
+  deleteProjectRow,
+  getProjectRow,
+  listProjects,
+  listMessages,
+  listReqs,
+  listTests,
+  listVersions,
+  getVersion,
+} from "./local-db";
 
-export const listMyProjects = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    const { data, error } = await supabaseAdmin
-      .from("projects")
-      .select("id, slug, title, icon_url, theme, is_published, updated_at, created_at")
-      .eq("owner_id", context.userId)
-      .order("updated_at", { ascending: false });
-    if (error) throw new Error(error.message);
-    const projects = data ?? [];
-    if (projects.length === 0) return [];
-
-    const ids = projects.map((p) => p.id);
-    const [{ data: reqs }, { data: tests }] = await Promise.all([
-      supabaseAdmin
-        .from("requirements")
-        .select("project_id, status")
-        .in("project_id", ids),
-      supabaseAdmin
-        .from("test_results")
-        .select("project_id, kind, passed, issue_count, created_at")
-        .in("project_id", ids)
-        .order("created_at", { ascending: false }),
-    ]);
-
-    const reqStats = new Map<string, { total: number; done: number }>();
-    for (const r of reqs ?? []) {
-      const s = reqStats.get(r.project_id) ?? { total: 0, done: 0 };
-      if (r.status !== "removed") s.total += 1;
-      if (r.status === "done") s.done += 1;
-      reqStats.set(r.project_id, s);
-    }
-    const latestStatic = new Map<string, { passed: boolean; issueCount: number }>();
-    for (const t of tests ?? []) {
-      if (t.kind !== "static") continue;
-      if (latestStatic.has(t.project_id)) continue;
-      latestStatic.set(t.project_id, { passed: t.passed, issueCount: t.issue_count });
-    }
-    return projects.map((p) => {
-      const s = reqStats.get(p.id) ?? { total: 0, done: 0 };
-      return {
-        ...p,
-        progress: { total: s.total, done: s.done, pct: s.total === 0 ? 0 : Math.round((s.done / s.total) * 100) },
-        lastStatic: latestStatic.get(p.id) ?? null,
-      };
+export async function listMyProjects() {
+  const projects = await listProjects();
+  if (projects.length === 0) return [];
+  const out = [];
+  for (const p of projects) {
+    const reqs = await listReqs(p.id);
+    const total = reqs.filter((r) => r.status !== "removed").length;
+    const done = reqs.filter((r) => r.status === "done").length;
+    const tests = await listTests(p.id, 5);
+    const latest = tests.find((t) => t.kind === "static") ?? null;
+    out.push({
+      id: p.id,
+      slug: p.slug,
+      title: p.title,
+      icon_url: p.icon_url,
+      theme: p.theme,
+      is_published: p.is_published,
+      updated_at: p.updated_at,
+      created_at: p.created_at,
+      progress: { total, done, pct: total === 0 ? 0 : Math.round((done / total) * 100) },
+      lastStatic: latest ? { passed: latest.passed, issueCount: latest.issue_count } : null,
     });
-  });
+  }
+  return out;
+}
 
-export const getProject = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) => z.object({ projectId: z.string().uuid() }).parse(input))
-  .handler(async ({ data, context }) => {
-    const { data: project, error } = await supabaseAdmin
-      .from("projects")
-      .select("*")
-      .eq("id", data.projectId)
-      .eq("owner_id", context.userId)
-      .single();
-    if (error || !project) throw new Error("Not found");
+export async function getProject({ data }: { data: { projectId: string } }) {
+  const project = await getProjectRow(data.projectId);
+  if (!project) throw new Error("Not found");
+  const [versionsAll, messages] = await Promise.all([
+    listVersions(data.projectId),
+    listMessages(data.projectId),
+  ]);
+  const versions = versionsAll.map((v) => ({
+    id: v.id,
+    version_num: v.version_num,
+    created_by_message: v.created_by_message,
+    created_at: v.created_at,
+  }));
+  let tabs: { name: string; icon: string; html: string }[] = [];
+  if (project.current_version_id) {
+    const cur = await getVersion(data.projectId, project.current_version_id);
+    if (cur) tabs = cur.tabs;
+  }
+  return { project, versions, messages, tabs };
+}
 
-    const [{ data: versions }, { data: messages }, { data: current }] = await Promise.all([
-      supabaseAdmin
-        .from("project_versions")
-        .select("id, version_num, created_by_message, created_at")
-        .eq("project_id", project.id)
-        .order("version_num", { ascending: false }),
-      supabaseAdmin
-        .from("project_messages")
-        .select("id, role, content, created_at")
-        .eq("project_id", project.id)
-        .order("created_at", { ascending: true }),
-      project.current_version_id
-        ? supabaseAdmin
-            .from("project_versions")
-            .select("tabs")
-            .eq("id", project.current_version_id)
-            .maybeSingle()
-        : Promise.resolve({ data: null }),
-    ]);
-
-    const tabs = (current?.tabs ?? []) as Array<{ name: string; icon: string; html: string }>;
-    return {
-      project,
-      versions: versions ?? [],
-      messages: messages ?? [],
-      tabs,
-    };
-  });
-
-export const deleteProject = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-
-  .inputValidator((input) => z.object({ projectId: z.string().uuid() }).parse(input))
-  .handler(async ({ data, context }) => {
-    const { error } = await supabaseAdmin
-      .from("projects")
-      .delete()
-      .eq("id", data.projectId)
-      .eq("owner_id", context.userId);
-    if (error) throw new Error(error.message);
-    return { ok: true };
-  });
+export async function deleteProject({ data }: { data: { projectId: string } }) {
+  await deleteProjectRow(data.projectId);
+  return { ok: true };
+}

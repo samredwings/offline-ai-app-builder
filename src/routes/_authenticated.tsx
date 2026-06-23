@@ -1,12 +1,10 @@
 import { createFileRoute, Outlet, redirect, Link, useNavigate } from "@tanstack/react-router";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { getStableSession } from "@/lib/auth-session";
+import { canEnter, lock } from "@/lib/local-auth";
 
 export const Route = createFileRoute("/_authenticated")({
   beforeLoad: async () => {
-    const session = await getStableSession();
-    if (!session) {
+    if (!(await canEnter())) {
       throw redirect({ to: "/auth" });
     }
   },
@@ -15,8 +13,8 @@ export const Route = createFileRoute("/_authenticated")({
 
 function AuthedLayout() {
   const navigate = useNavigate();
-  async function signOut() {
-    await supabase.auth.signOut();
+  function signOut() {
+    lock();
     navigate({ to: "/auth" });
   }
   return (
@@ -27,11 +25,14 @@ function AuthedLayout() {
             App Forge
           </Link>
           <div className="flex items-center gap-2">
+            <Link to="/settings">
+              <Button size="sm" variant="ghost">Settings</Button>
+            </Link>
             <Link to="/new">
               <Button size="sm">New app</Button>
             </Link>
             <Button size="sm" variant="ghost" onClick={signOut}>
-              Sign out
+              Lock
             </Button>
           </div>
         </div>
