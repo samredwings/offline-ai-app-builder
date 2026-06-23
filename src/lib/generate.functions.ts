@@ -1,8 +1,15 @@
-import { createServerFn } from "@tanstack/react-start";
-import { z } from "zod";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { callAIWithTool, generateImage } from "./ai.server";
+// App generation + refinement — runs entirely in the browser using the user's AI key.
+import { callAIWithTool, generateImageDataUrl } from "./ai-client";
+import {
+  getProjectRow,
+  getVersion,
+  insertMessages,
+  insertProject,
+  insertVersion,
+  listMessages,
+  newId,
+  updateProjectRow,
+} from "./local-db";
 import { slugify } from "./slug";
 import { extractRequirementsForTurn, runStaticTestsForCurrentVersion } from "./roadmap.functions";
 import type { AppSpec, Theme } from "./types";
@@ -17,8 +24,7 @@ Output a single tool call producing an app spec. Rules:
 - Never include login/signup, payment forms, fake premium toggles, ads, or analytics.
 - Tab icons must be a single emoji.
 - Theme colors must be valid hex.
-- Each tab should be visually rich, with real interactive content—not placeholders.
-- Use semantic, attractive layouts: cards, lists, inputs, buttons styled with .gen-btn-primary and .gen-card.`;
+- Each tab should be visually rich, with real interactive content—not placeholders.`;
 
 const TOOL_GENERATE = {
   type: "function" as const,
@@ -57,7 +63,7 @@ const TOOL_GENERATE = {
           },
           required: ["primary", "background", "foreground", "accent"],
         },
-        icon_prompt: { type: "string", description: "Prompt for an app icon image, square, flat, modern." },
+        icon_prompt: { type: "string" },
         persistence: { type: "string", enum: ["local", "synced"] },
       },
       required: ["title", "template_family", "tabs", "theme", "icon_prompt", "persistence"],
@@ -72,8 +78,10 @@ function validateSpec(spec: AppSpec): string[] {
     errs.push("must have 2–5 tabs");
   for (const t of spec.tabs ?? []) {
     if (!t.html || t.html.length < 30) errs.push(`tab "${t.name}" html too short`);
-    if (/<\s*(html|head|body)\b/i.test(t.html ?? "")) errs.push(`tab "${t.name}" must not include html/head/body`);
-    if (/<script[^>]*src=/i.test(t.html ?? "")) errs.push(`tab "${t.name}" must not load external scripts`);
+    if (/<\s*(html|head|body)\b/i.test(t.html ?? ""))
+      errs.push(`tab "${t.name}" must not include html/head/body`);
+    if (/<script[^>]*src=/i.test(t.html ?? ""))
+      errs.push(`tab "${t.name}" must not load external scripts`);
   }
   for (const k of ["primary", "background", "foreground", "accent"] as (keyof Theme)[]) {
     const v = spec.theme?.[k];
@@ -87,15 +95,10 @@ async function generateSpec(prompt: string): Promise<AppSpec> {
     { role: "system" as const, content: SYSTEM_GENERATE },
     { role: "user" as const, content: `App idea: ${prompt}` },
   ];
-  let spec = await callAIWithTool<AppSpec>({
-    model: "google/gemini-3-flash-preview",
-    messages,
-    tool: TOOL_GENERATE,
-  });
-  let errs = validateSpec(spec);
+  let spec = await callAIWithTool<AppSpec>({ messages, tool: TOOL_GENERATE });
+  const errs = validateSpec(spec);
   if (errs.length > 0) {
     const retry = await callAIWithTool<AppSpec>({
-      model: "google/gemini-3-flash-preview",
       messages: [
         ...messages,
         {
@@ -105,110 +108,71 @@ async function generateSpec(prompt: string): Promise<AppSpec> {
       ],
       tool: TOOL_GENERATE,
     });
-    const retryErrs = validateSpec(retry);
-    if (retryErrs.length === 0) spec = retry;
+    if (validateSpec(retry).length === 0) spec = retry;
   }
   return spec;
 }
 
-async function uploadIcon(ownerId: string, projectId: string, prompt: string): Promise<string | null> {
-  try {
-    const img = await generateImage({
-      prompt: `App icon: ${prompt}. Flat, modern, vibrant, single subject centered, no text, square, suitable for mobile home screen.`,
-    });
-    const path = `${ownerId}/${projectId}.png`;
-    const buf = Uint8Array.from(atob(img.base64), (c) => c.charCodeAt(0));
-    const { error } = await supabaseAdmin.storage
-      .from("app-icons")
-      .upload(path, buf, { contentType: img.mimeType, upsert: true });
-    if (error) {
-      console.error("icon upload", error);
-      return null;
-    }
-    const { data } = supabaseAdmin.storage.from("app-icons").getPublicUrl(path);
-    return data.publicUrl;
-  } catch (e) {
-    console.error("icon gen failed", e);
-    return null;
-  }
-}
+export async function classifyAndGenerate({ data }: { data: { prompt: string } }) {
+  const spec = await generateSpec(data.prompt);
+  const slug = slugify(spec.title);
+  const projectId = newId();
+  const versionId = newId();
 
-export const classifyAndGenerate = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) => z.object({ prompt: z.string().min(3).max(100000) }).parse(input))
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
-
-    const spec = await generateSpec(data.prompt);
-
-    const slug = slugify(spec.title);
-    const projectId = crypto.randomUUID();
-
-    // Insert project first so we can use id in storage path.
-    const { error: projErr } = await supabaseAdmin.from("projects").insert({
-      id: projectId,
-      owner_id: userId,
-      slug,
-      title: spec.title,
-      prompt: data.prompt,
-      template_family: spec.template_family,
-      theme: spec.theme,
-    });
-    if (projErr) throw new Error(projErr.message);
-
-    const { data: versionRow, error: vErr } = await supabaseAdmin
-      .from("project_versions")
-      .insert({
-        project_id: projectId,
-        version_num: 1,
-        tabs: spec.tabs,
-        created_by_message: data.prompt,
-      })
-      .select("id")
-      .single();
-    if (vErr) throw new Error(vErr.message);
-
-    const iconUrl = await uploadIcon(userId, projectId, spec.icon_prompt);
-
-    await supabaseAdmin
-      .from("projects")
-      .update({ current_version_id: versionRow.id, icon_url: iconUrl })
-      .eq("id", projectId);
-
-    await supabaseAdmin.from("project_messages").insert([
-      { project_id: projectId, role: "user", content: data.prompt },
-      {
-        project_id: projectId,
-        role: "assistant",
-        content: `Generated ${spec.title} with ${spec.tabs.length} tabs.`,
-        version_id_after: versionRow.id,
-      },
-    ]);
-
-    const firstAssistantReply = `Generated ${spec.title} with ${spec.tabs.length} tabs.`;
-    await Promise.all([
-      extractRequirementsForTurn({
-        projectId,
-        versionNum: 1,
-        userMessage: data.prompt,
-        assistantReply: firstAssistantReply,
-        isFirstTurn: true,
-      }).catch((e) => console.error("[brd] initial extract failed", e)),
-      runStaticTestsForCurrentVersion(projectId).catch((e) =>
-        console.error("[tests] initial static failed", e)
-      ),
-    ]);
-
-    return { projectId, slug };
+  await insertProject({
+    id: projectId,
+    slug,
+    title: spec.title,
+    prompt: data.prompt,
+    template_family: spec.template_family,
+    theme: spec.theme,
+    icon_url: null,
+    is_published: false,
+    current_version_id: versionId,
   });
+  await insertVersion({
+    id: versionId,
+    project_id: projectId,
+    version_num: 1,
+    tabs: spec.tabs,
+    created_by_message: data.prompt,
+  });
+
+  // Try image gen but don't fail the whole flow.
+  let iconUrl: string | null = null;
+  try {
+    iconUrl = await generateImageDataUrl(
+      `App icon: ${spec.icon_prompt}. Flat, modern, vibrant, single subject centered, no text, square.`,
+    );
+  } catch {
+    iconUrl = null;
+  }
+  if (iconUrl) await updateProjectRow(projectId, { icon_url: iconUrl });
+
+  const firstAssistantReply = `Generated ${spec.title} with ${spec.tabs.length} tabs.`;
+  await insertMessages(projectId, [
+    { project_id: projectId, role: "user", content: data.prompt },
+    { project_id: projectId, role: "assistant", content: firstAssistantReply, version_id_after: versionId },
+  ]);
+
+  // Fire-and-forget extras.
+  void extractRequirementsForTurn({
+    projectId,
+    versionNum: 1,
+    userMessage: data.prompt,
+    assistantReply: firstAssistantReply,
+    isFirstTurn: true,
+  }).catch(() => {});
+  void runStaticTestsForCurrentVersion(projectId).catch(() => {});
+
+  return { projectId, slug };
+}
 
 const SYSTEM_CHAT = `You are the AI co-builder of a small mobile web app. You converse naturally with the creator AND can rebuild the app when they ask for changes.
 
 For every user message, return ONE tool call deciding what to do:
 - mode="chat": questions, brainstorming, status, clarifications. Write a short, friendly reply (1–4 sentences). Do NOT change the app.
-- mode="edit": user is asking for an actual change to the app (add/remove/rename tabs, change behavior, content, theme, etc.). Write a short reply describing what you're going to change (1–3 sentences) and put the actionable instruction in edit_instruction.
-
-Use the conversation history for context. Be concise and friendly. Reference the user's prior messages when helpful.`;
+- mode="edit": user is asking for an actual change to the app. Write a short reply describing what you're going to change and put the actionable instruction in edit_instruction.`;
 
 const TOOL_CHAT_ROUTE = {
   type: "function" as const,
@@ -219,284 +183,156 @@ const TOOL_CHAT_ROUTE = {
       type: "object",
       properties: {
         mode: { type: "string", enum: ["chat", "edit"] },
-        reply: { type: "string", description: "Assistant message to show in chat (1–4 sentences)." },
-        edit_instruction: {
-          type: "string",
-          description: "Required when mode='edit'. Self-contained instruction to apply to the app spec.",
-        },
+        reply: { type: "string" },
+        edit_instruction: { type: "string" },
       },
       required: ["mode", "reply"],
     },
   },
 };
 
-export const refineProject = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) =>
-    z.object({ projectId: z.string().uuid(), message: z.string().min(1).max(100000) }).parse(input)
-  )
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
+export async function refineProject({
+  data,
+}: {
+  data: { projectId: string; message: string };
+}) {
+  const project = await getProjectRow(data.projectId);
+  if (!project) throw new Error("Not found");
+  if (!project.current_version_id) throw new Error("No current version");
 
-    const { data: project } = await supabaseAdmin
-      .from("projects")
-      .select("id, owner_id, title, prompt, theme, current_version_id")
-      .eq("id", data.projectId)
-      .single();
-    if (!project || project.owner_id !== userId) throw new Error("Not found");
-    if (!project.current_version_id) throw new Error("No current version");
+  const current = await getVersion(data.projectId, project.current_version_id);
+  if (!current) throw new Error("No current version");
 
-    const { data: current } = await supabaseAdmin
-      .from("project_versions")
-      .select("tabs, version_num")
-      .eq("id", project.current_version_id)
-      .single();
-    if (!current) throw new Error("No current version");
+  const history = (await listMessages(data.projectId)).slice(-20);
 
-    // Load recent conversation for context.
-    const { data: history } = await supabaseAdmin
-      .from("project_messages")
-      .select("role, content")
-      .eq("project_id", data.projectId)
-      .order("created_at", { ascending: true })
-      .limit(20);
+  const appSummary = `Current app: "${project.title}" with ${current.tabs.length} tab(s): ${current.tabs
+    .map((t) => t.name)
+    .join(", ")}.`;
 
-    const appSummary = `Current app: "${project.title}" with ${(current.tabs as { name: string }[]).length} tab(s): ${
-      (current.tabs as { name: string }[]).map((t) => t.name).join(", ")
-    }.`;
+  const routeMessages = [
+    { role: "system" as const, content: `${SYSTEM_CHAT}\n\n${appSummary}` },
+    ...history.map((m) => ({ role: m.role, content: m.content })),
+    { role: "user" as const, content: data.message },
+  ];
 
-    const routeMessages = [
-      { role: "system" as const, content: `${SYSTEM_CHAT}\n\n${appSummary}` },
-      ...((history ?? []).map((m) => ({
-        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-        content: m.content,
-      }))),
-      { role: "user" as const, content: data.message },
-    ];
+  const decision = await callAIWithTool<{
+    mode: "chat" | "edit";
+    reply: string;
+    edit_instruction?: string;
+  }>({ messages: routeMessages, tool: TOOL_CHAT_ROUTE });
 
-    const decision = await callAIWithTool<{
-      mode: "chat" | "edit";
-      reply: string;
-      edit_instruction?: string;
-    }>({
-      model: "google/gemini-3-flash-preview",
-      messages: routeMessages,
-      tool: TOOL_CHAT_ROUTE,
-    });
+  if (decision.mode === "chat" || !decision.edit_instruction) {
+    await insertMessages(data.projectId, [
+      { project_id: data.projectId, role: "user", content: data.message },
+      { project_id: data.projectId, role: "assistant", content: decision.reply },
+    ]);
+    return { mode: "chat" as const };
+  }
 
-    // CHAT mode: just store the exchange and return.
-    if (decision.mode === "chat" || !decision.edit_instruction) {
-      await supabaseAdmin.from("project_messages").insert([
-        { project_id: data.projectId, role: "user", content: data.message },
-        { project_id: data.projectId, role: "assistant", content: decision.reply },
-      ]);
-      return { mode: "chat" as const };
-    }
-
-    // EDIT mode: regenerate spec using the instruction + conversation context.
-    const editMessages = [
-      { role: "system" as const, content: SYSTEM_GENERATE },
-      {
-        role: "user" as const,
-        content: `Existing app spec:\n${JSON.stringify({
-          title: project.title,
-          theme: project.theme,
-          tabs: current.tabs,
-        })}\n\nRecent conversation:\n${(history ?? [])
-          .slice(-8)
-          .map((m) => `${m.role}: ${m.content}`)
-          .join("\n")}\n\nUser refinement: ${decision.edit_instruction}\n\nReturn a complete new app spec applying the refinement. Keep prior content unless the user asked to change it.`,
-      },
-    ];
-    let spec = await callAIWithTool<AppSpec>({
-      model: "google/gemini-3-flash-preview",
-      messages: editMessages,
+  const editMessages = [
+    { role: "system" as const, content: SYSTEM_GENERATE },
+    {
+      role: "user" as const,
+      content: `Existing app spec:\n${JSON.stringify({
+        title: project.title,
+        theme: project.theme,
+        tabs: current.tabs,
+      })}\n\nRecent conversation:\n${history
+        .slice(-8)
+        .map((m) => `${m.role}: ${m.content}`)
+        .join("\n")}\n\nUser refinement: ${decision.edit_instruction}\n\nReturn a complete new app spec applying the refinement. Keep prior content unless the user asked to change it.`,
+    },
+  ];
+  let spec = await callAIWithTool<AppSpec>({ messages: editMessages, tool: TOOL_GENERATE });
+  if (validateSpec(spec).length > 0) {
+    spec = await callAIWithTool<AppSpec>({
+      messages: [
+        ...editMessages,
+        { role: "user", content: `Validation failed. Fix and return again.` },
+      ],
       tool: TOOL_GENERATE,
     });
-    const errs = validateSpec(spec);
-    if (errs.length > 0) {
-      spec = await callAIWithTool<AppSpec>({
-        model: "google/gemini-3-flash-preview",
-        messages: [
-          ...editMessages,
-          { role: "user", content: `Validation failed:\n${errs.join("\n")}\nFix and return again.` },
-        ],
-        tool: TOOL_GENERATE,
-      });
-    }
+  }
 
-    const newVersionNum = (current.version_num ?? 1) + 1;
-    const { data: v, error } = await supabaseAdmin
-      .from("project_versions")
-      .insert({
-        project_id: data.projectId,
-        version_num: newVersionNum,
-        tabs: spec.tabs,
-        created_by_message: data.message,
-      })
-      .select("id")
-      .single();
-    if (error) throw new Error(error.message);
-
-    await supabaseAdmin
-      .from("projects")
-      .update({
-        current_version_id: v.id,
-        title: spec.title,
-        theme: spec.theme,
-      })
-      .eq("id", data.projectId);
-
-    await supabaseAdmin.from("project_messages").insert([
-      { project_id: data.projectId, role: "user", content: data.message },
-      {
-        project_id: data.projectId,
-        role: "assistant",
-        content: decision.reply,
-        version_id_after: v.id,
-      },
-    ]);
-
-    await Promise.all([
-      extractRequirementsForTurn({
-        projectId: data.projectId,
-        versionNum: newVersionNum,
-        userMessage: data.message,
-        assistantReply: decision.reply,
-        isFirstTurn: false,
-      }).catch((e) => console.error("[brd] extract failed", e)),
-      runStaticTestsForCurrentVersion(data.projectId).catch((e) =>
-        console.error("[tests] static failed", e)
-      ),
-    ]);
-
-    return { mode: "edit" as const, versionId: v.id };
+  const newVersionNum = current.version_num + 1;
+  const versionId = newId();
+  await insertVersion({
+    id: versionId,
+    project_id: data.projectId,
+    version_num: newVersionNum,
+    tabs: spec.tabs,
+    created_by_message: data.message,
   });
-
-
-export const revertToVersion = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) =>
-    z.object({ projectId: z.string().uuid(), versionId: z.string().uuid() }).parse(input)
-  )
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const { data: project } = await supabaseAdmin
-      .from("projects")
-      .select("owner_id")
-      .eq("id", data.projectId)
-      .single();
-    if (!project || project.owner_id !== userId) throw new Error("Not found");
-    const { data: ver } = await supabaseAdmin
-      .from("project_versions")
-      .select("id")
-      .eq("id", data.versionId)
-      .eq("project_id", data.projectId)
-      .maybeSingle();
-    if (!ver) throw new Error("Version not found");
-    await supabaseAdmin
-      .from("projects")
-      .update({ current_version_id: data.versionId })
-      .eq("id", data.projectId);
-    return { ok: true };
+  await updateProjectRow(data.projectId, {
+    current_version_id: versionId,
+    title: spec.title,
+    theme: spec.theme,
   });
+  await insertMessages(data.projectId, [
+    { project_id: data.projectId, role: "user", content: data.message },
+    { project_id: data.projectId, role: "assistant", content: decision.reply, version_id_after: versionId },
+  ]);
 
-export const updateProjectMeta = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) =>
-    z
-      .object({
-        projectId: z.string().uuid(),
-        title: z.string().min(1).max(60).optional(),
-        theme: z
-          .object({
-            primary: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
-            background: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
-            foreground: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
-            accent: z.string().regex(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i),
-          })
-          .optional(),
+  void extractRequirementsForTurn({
+    projectId: data.projectId,
+    versionNum: newVersionNum,
+    userMessage: data.message,
+    assistantReply: decision.reply,
+    isFirstTurn: false,
+  }).catch(() => {});
+  void runStaticTestsForCurrentVersion(data.projectId).catch(() => {});
 
-        is_published: z.boolean().optional(),
-      })
-      .parse(input)
-  )
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const patch: {
-      title?: string;
-      theme?: { primary: string; background: string; foreground: string; accent: string };
-      is_published?: boolean;
-    } = {};
-    if (data.title !== undefined) patch.title = data.title;
-    if (data.theme !== undefined) patch.theme = data.theme;
-    if (data.is_published !== undefined) patch.is_published = data.is_published;
+  return { mode: "edit" as const, versionId };
+}
 
-    const { error } = await supabaseAdmin
-      .from("projects")
-      .update(patch)
-      .eq("id", data.projectId)
-      .eq("owner_id", userId);
-    if (error) throw new Error(error.message);
-    return { ok: true };
-  });
+export async function revertToVersion({
+  data,
+}: {
+  data: { projectId: string; versionId: string };
+}) {
+  const v = await getVersion(data.projectId, data.versionId);
+  if (!v) throw new Error("Version not found");
+  await updateProjectRow(data.projectId, { current_version_id: data.versionId });
+  return { ok: true };
+}
 
-export const regenerateIcon = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) =>
-    z.object({ projectId: z.string().uuid(), prompt: z.string().min(3).max(500) }).parse(input)
-  )
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const { data: project } = await supabaseAdmin
-      .from("projects")
-      .select("owner_id")
-      .eq("id", data.projectId)
-      .single();
-    if (!project || project.owner_id !== userId) throw new Error("Not found");
-    const url = await uploadIcon(userId, data.projectId, data.prompt);
-    if (!url) throw new Error("Image generation failed");
-    await supabaseAdmin.from("projects").update({ icon_url: url }).eq("id", data.projectId);
-    return { iconUrl: url };
-  });
+export async function updateProjectMeta({
+  data,
+}: {
+  data: { projectId: string; title?: string; theme?: Theme; is_published?: boolean };
+}) {
+  if (data.is_published === true) {
+    throw new Error("Publishing is disabled in local-only mode.");
+  }
+  const patch: Partial<{ title: string; theme: Theme; is_published: boolean }> = {};
+  if (data.title !== undefined) patch.title = data.title;
+  if (data.theme !== undefined) patch.theme = data.theme;
+  if (data.is_published !== undefined) patch.is_published = data.is_published;
+  await updateProjectRow(data.projectId, patch);
+  return { ok: true };
+}
 
-export const uploadCustomIcon = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input) =>
-    z
-      .object({
-        projectId: z.string().uuid(),
-        base64: z.string().min(10).max(10_000_000),
-        contentType: z.string().regex(/^image\/(png|jpeg|webp)$/).default("image/png"),
-      })
-      .parse(input)
-  )
-  .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const { data: project } = await supabaseAdmin
-      .from("projects")
-      .select("owner_id")
-      .eq("id", data.projectId)
-      .single();
-    if (!project || project.owner_id !== userId) throw new Error("Not found");
+export async function regenerateIcon({
+  data,
+}: {
+  data: { projectId: string; prompt: string };
+}) {
+  const url = await generateImageDataUrl(
+    `App icon: ${data.prompt}. Flat, modern, vibrant, single subject centered, no text, square.`,
+  );
+  if (!url) {
+    throw new Error("Image gen unavailable. Set an image model in Settings.");
+  }
+  await updateProjectRow(data.projectId, { icon_url: url });
+  return { iconUrl: url };
+}
 
-    const ext = data.contentType === "image/jpeg" ? "jpg" : data.contentType === "image/webp" ? "webp" : "png";
-    const path = `${userId}/${data.projectId}/${Date.now()}.${ext}`;
-    const bytes = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0));
-
-    const { error: upErr } = await supabaseAdmin.storage
-      .from("app-icons")
-      .upload(path, bytes, { contentType: data.contentType, upsert: false });
-    if (upErr) throw new Error(upErr.message);
-
-    const { data: pub } = supabaseAdmin.storage.from("app-icons").getPublicUrl(path);
-    const iconUrl = pub.publicUrl;
-
-    const { error: updErr } = await supabaseAdmin
-      .from("projects")
-      .update({ icon_url: iconUrl })
-      .eq("id", data.projectId);
-    if (updErr) throw new Error(updErr.message);
-
-    return { iconUrl };
-  });
+export async function uploadCustomIcon({
+  data,
+}: {
+  data: { projectId: string; base64: string; contentType: string };
+}) {
+  const url = `data:${data.contentType};base64,${data.base64}`;
+  await updateProjectRow(data.projectId, { icon_url: url });
+  return { iconUrl: url };
+}

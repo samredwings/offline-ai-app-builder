@@ -1,5 +1,4 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useServerFn } from "@tanstack/react-start";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { listMyProjects, deleteProject } from "@/lib/projects.functions";
 import { Button } from "@/components/ui/button";
@@ -11,17 +10,15 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 function Dashboard() {
-  const list = useServerFn(listMyProjects);
-  const del = useServerFn(deleteProject);
   const navigate = useNavigate();
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["projects"],
-    queryFn: () => list({}),
+    queryFn: () => listMyProjects(),
   });
 
   const delMut = useMutation({
-    mutationFn: (projectId: string) => del({ data: { projectId } }),
+    mutationFn: (projectId: string) => deleteProject({ data: { projectId } }),
     onSuccess: () => {
       toast.success("Deleted");
       refetch();
@@ -61,25 +58,18 @@ function Dashboard() {
                 className="flex items-center gap-4"
               >
                 {p.icon_url ? (
-                  <img
-                    src={p.icon_url}
-                    alt=""
-                    className="h-12 w-12 rounded-xl object-cover"
-                  />
+                  <img src={p.icon_url} alt="" className="h-12 w-12 rounded-xl object-cover" />
                 ) : (
                   <div
                     className="h-12 w-12 rounded-xl"
-                    style={{ background: (p.theme as { primary?: string })?.primary ?? "#4f46e5" }}
+                    style={{ background: p.theme?.primary ?? "#4f46e5" }}
                   />
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">{p.title}</div>
                   <div className="flex gap-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                     <span>ID: {p.id.slice(0, 8)}</span>
-                    <span>
-                      {p.is_published ? "Published" : "Draft"} ·{" "}
-                      {new Date(p.created_at).toLocaleDateString()}
-                    </span>
+                    <span>{new Date(p.created_at).toLocaleDateString()}</span>
                   </div>
                 </div>
               </Link>
@@ -87,15 +77,10 @@ function Dashboard() {
               <div className="mt-3 space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>Progress</span>
-                  <span>
-                    {p.progress.done}/{p.progress.total} ({p.progress.pct}%)
-                  </span>
+                  <span>{p.progress.done}/{p.progress.total} ({p.progress.pct}%)</span>
                 </div>
                 <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full bg-primary transition-all"
-                    style={{ width: `${p.progress.pct}%` }}
-                  />
+                  <div className="h-full bg-primary transition-all" style={{ width: `${p.progress.pct}%` }} />
                 </div>
                 {p.lastStatic && (
                   <div
@@ -115,9 +100,7 @@ function Dashboard() {
 
               <div className="mt-4 flex items-center justify-end gap-2">
                 <Link to="/editor/$id" params={{ id: p.id }}>
-                  <Button variant="outline" size="sm">
-                    Edit app
-                  </Button>
+                  <Button variant="outline" size="sm">Edit app</Button>
                 </Link>
                 <Button
                   variant="ghost"

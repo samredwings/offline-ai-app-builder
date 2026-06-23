@@ -1,5 +1,4 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useServerFn } from "@tanstack/react-start";
 import { useQuery, useMutation, useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { getProject } from "@/lib/projects.functions";
@@ -10,13 +9,11 @@ import {
   regenerateIcon,
   uploadCustomIcon,
 } from "@/lib/generate.functions";
-import { updateAIRuntime } from "@/lib/export.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { PreviewIframe } from "@/components/PreviewIframe";
 import { ThemeEditor } from "@/components/theme-editor";
@@ -25,8 +22,7 @@ import { ChatTab } from "@/components/chat/ChatTab";
 import { ExportTab } from "@/components/export/ExportTab";
 import { RoadmapTab } from "@/components/RoadmapTab";
 import { renderAppHTML } from "@/lib/app-runtime";
-import type { Theme, AIRuntime, Message } from "@/lib/types";
-
+import type { Theme, Message } from "@/lib/types";
 
 export const Route = createFileRoute("/_authenticated/editor/$id")({
   head: () => ({ meta: [{ title: "Editor — App Forge" }] }),
@@ -40,23 +36,14 @@ type ProjectRow = {
   theme: Theme;
   icon_url: string | null;
   is_published: boolean;
-  ai_runtime: AIRuntime;
-  ai_remote_endpoint: string | null;
-  ai_remote_model: string | null;
-  ai_ondevice_model: string | null;
 };
 
 function Editor() {
   const { id } = Route.useParams();
-  const get = useServerFn(getProject);
-  const refine = useServerFn(refineProject);
-  const revert = useServerFn(revertToVersion);
-  const meta = useServerFn(updateProjectMeta);
-  const regen = useServerFn(regenerateIcon);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["project", id],
-    queryFn: () => get({ data: { projectId: id } }),
+    queryFn: () => getProject({ data: { projectId: id } }),
   });
 
   const queryClient = useQueryClient();
@@ -64,10 +51,8 @@ function Editor() {
 
   const refineMut = useMutation({
     mutationKey: refineMutationKey,
-    mutationFn: (message: string) => refine({ data: { projectId: id, message } }),
+    mutationFn: (message: string) => refineProject({ data: { projectId: id, message } }),
     onMutate: (message: string) => {
-      // Optimistically append the user's message so the chat reflects the send immediately,
-      // even before the AI responds — fixes "AI is waiting on me" perception.
       const prev = queryClient.getQueryData(["project", id]) as
         | { messages?: Message[] }
         | undefined;
@@ -101,25 +86,22 @@ function Editor() {
     },
   });
 
-  // Detects an in-flight refine even after navigating away and back to this editor —
-  // mutations run on the QueryClient, which lives at the root and outlives the page.
   const isRefining = useIsMutating({ mutationKey: refineMutationKey }) > 0;
 
-
   const revertMut = useMutation({
-    mutationFn: (versionId: string) => revert({ data: { projectId: id, versionId } }),
+    mutationFn: (versionId: string) => revertToVersion({ data: { projectId: id, versionId } }),
     onSuccess: () => refetch(),
   });
 
   const metaMut = useMutation({
-    mutationFn: (patch: { title?: string; theme?: Theme; is_published?: boolean }) =>
-      meta({ data: { projectId: id, ...patch } }),
+    mutationFn: (patch: { title?: string; theme?: Theme }) =>
+      updateProjectMeta({ data: { projectId: id, ...patch } }),
     onSuccess: () => refetch(),
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
   });
 
   const regenMut = useMutation({
-    mutationFn: (prompt: string) => regen({ data: { projectId: id, prompt } }),
+    mutationFn: (prompt: string) => regenerateIcon({ data: { projectId: id, prompt } }),
     onSuccess: () => {
       toast.success("Icon updated");
       refetch();
@@ -127,7 +109,6 @@ function Editor() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
   });
 
-  const uploadIcon = useServerFn(uploadCustomIcon);
   const uploadIconMut = useMutation({
     mutationFn: async (blob: Blob) => {
       const buf = await blob.arrayBuffer();
@@ -135,8 +116,8 @@ function Editor() {
       const bytes = new Uint8Array(buf);
       for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
       const base64 = btoa(binary);
-      return uploadIcon({
-        data: { projectId: id, base64, contentType: (blob.type || "image/png") as "image/png" },
+      return uploadCustomIcon({
+        data: { projectId: id, base64, contentType: blob.type || "image/png" },
       });
     },
     onSuccess: () => {
@@ -145,24 +126,6 @@ function Editor() {
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Upload failed"),
   });
-
-  const updateAI = useServerFn(updateAIRuntime);
-
-  const aiMut = useMutation({
-    mutationFn: (patch: {
-      runtime: AIRuntime;
-      remoteEndpoint?: string | null;
-      remoteModel?: string | null;
-      ondeviceModel?: string | null;
-    }) => updateAI({ data: { projectId: id, ...patch } }),
-    onSuccess: () => {
-      toast.success("AI runtime updated");
-      refetch();
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
-  });
-
-
 
   const previewHtml = useMemo(() => {
     if (!data) return "";
@@ -173,14 +136,6 @@ function Editor() {
       theme: p.theme,
       iconUrl: p.icon_url,
       tabs: data.tabs,
-      manifestUrl: `/api/public/manifest/${p.slug}`,
-      appDataEndpoint: `/api/public/app-data/${p.slug}`,
-      ai: {
-        runtime: p.ai_runtime,
-        remoteEndpoint: p.ai_remote_endpoint,
-        remoteModel: p.ai_remote_model,
-        ondeviceModel: p.ai_ondevice_model,
-      },
     });
   }, [data]);
 
@@ -189,16 +144,11 @@ function Editor() {
   }
 
   const project = data.project as unknown as ProjectRow;
-  const publishedUrl =
-    typeof window !== "undefined" ? `${window.location.origin}/a/${project.slug}` : "";
 
   return (
     <div className="flex flex-col h-screen md:grid md:grid-cols-[420px,1fr] overflow-hidden bg-background">
-      {/* LEFT SIDEBAR: Interactive Hub */}
       <aside className="border-r bg-muted/10 flex flex-col h-full overflow-hidden">
-        {/* Header bar */}
         <div className="p-4 border-b space-y-3 bg-card/30">
-
           <div className="flex items-center gap-3 justify-between">
             <Link to="/dashboard" className="shrink-0">
               <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1" title="Back to dashboard">
@@ -211,9 +161,7 @@ function Editor() {
               )}
               <Input
                 value={project.title}
-                onChange={(e) =>
-                  metaMut.mutate({ title: e.target.value.slice(0, 60) })
-                }
+                onChange={(e) => metaMut.mutate({ title: e.target.value.slice(0, 60) })}
                 className="h-8 text-sm font-semibold max-w-[180px]"
               />
             </div>
@@ -227,47 +175,26 @@ function Editor() {
           )}
 
           <div className="flex items-center justify-between gap-2 pt-1">
-            <div className="flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${project.is_published ? "bg-green-500 animate-pulse" : "bg-muted"}`} />
-              <span className="text-xs text-muted-foreground font-medium">
-                {project.is_published ? "Published" : "Draft"}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {project.is_published && (
-                <a
-                  href={publishedUrl}
-                  target="_blank"
-                  rel="noopener"
-                  className="text-xs text-primary hover:underline font-mono mr-1"
-                >
-                  open ↗
-                </a>
-              )}
-              <Button
-                variant={project.is_published ? "outline" : "default"}
-                size="sm"
-                className="h-7 text-xs px-2.5"
-                onClick={() => metaMut.mutate({ is_published: !project.is_published })}
-              >
-                {project.is_published ? "Unpublish" : "Publish App"}
+            <span className="text-[11px] text-muted-foreground">
+              Local-only • saved on this device
+            </span>
+            <Link to="/settings">
+              <Button variant="outline" size="sm" className="h-7 text-xs px-2.5">
+                AI Settings
               </Button>
-            </div>
+            </Link>
           </div>
         </div>
 
-        {/* Tabs Interface */}
         <Tabs defaultValue="chat" className="flex-1 flex flex-col overflow-hidden p-4">
-          <TabsList className="grid w-full grid-cols-6 shrink-0 h-9">
+          <TabsList className="grid w-full grid-cols-5 shrink-0 h-9">
             <TabsTrigger value="chat" className="text-xs">Chat</TabsTrigger>
             <TabsTrigger value="roadmap" className="text-xs">Plan</TabsTrigger>
             <TabsTrigger value="design" className="text-xs">Design</TabsTrigger>
-            <TabsTrigger value="ai" className="text-xs">AI</TabsTrigger>
             <TabsTrigger value="versions" className="text-xs">History</TabsTrigger>
             <TabsTrigger value="export" className="text-xs">Export</TabsTrigger>
           </TabsList>
 
-          {/* CHAT TAB */}
           <TabsContent value="chat" className="flex-1 flex flex-col min-h-0 mt-3 overflow-hidden">
             <ChatTab
               messages={data.messages as Message[]}
@@ -276,15 +203,10 @@ function Editor() {
             />
           </TabsContent>
 
-          {/* ROADMAP / PLAN TAB */}
           <TabsContent value="roadmap" className="flex-1 overflow-y-auto mt-3 pr-1">
             <RoadmapTab projectId={project.id} />
           </TabsContent>
 
-
-
-
-          {/* DESIGN TAB - Theme & Custom Icon */}
           <TabsContent value="design" className="flex-1 overflow-y-auto space-y-5 mt-3 pr-1">
             <ThemeEditor
               theme={project.theme}
@@ -294,7 +216,7 @@ function Editor() {
             <div className="space-y-3 pt-3 border-t">
               <div>
                 <Label className="text-xs font-semibold">Generate App Icon</Label>
-                <p className="text-xs text-muted-foreground">Describe what you want, then re-roll.</p>
+                <p className="text-xs text-muted-foreground">Requires an image model in Settings.</p>
               </div>
               <div className="flex gap-2">
                 <Input
@@ -327,101 +249,6 @@ function Editor() {
             </div>
           </TabsContent>
 
-          {/* AI TAB - Runtime Configurations */}
-          <TabsContent value="ai" className="flex-1 overflow-y-auto space-y-4 mt-3 pr-1">
-            <div className="space-y-2">
-              <Label className="text-xs font-semibold">AI Runtime Mode</Label>
-              <Select
-                value={project.ai_runtime}
-                onValueChange={(v) =>
-                  aiMut.mutate({
-                    runtime: v as AIRuntime,
-                    remoteEndpoint: project.ai_remote_endpoint,
-                    remoteModel: project.ai_remote_model,
-                    ondeviceModel: project.ai_ondevice_model,
-                  })
-                }
-              >
-                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="lovable" className="text-xs">Lovable AI (default, safe)</SelectItem>
-                  <SelectItem value="remote" className="text-xs">Remote endpoint (OpenAI-compatible)</SelectItem>
-                  <SelectItem value="on-device" className="text-xs">On-device (offline APK only)</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                {project.ai_runtime === "lovable" &&
-                  "Routed through this site. Content moderated."}
-                {project.ai_runtime === "remote" &&
-                  "App calls your endpoint. Users paste their own API key inside the app. You bring the rules."}
-                {project.ai_runtime === "on-device" &&
-                  "App loads a local .gguf model. Only works inside the APK built from the Export bundle."}
-              </p>
-            </div>
-
-            {project.ai_runtime === "remote" && (
-              <div className="space-y-3 pt-2 border-t">
-                <div className="space-y-1">
-                  <Label className="text-xs">Endpoint Base URL</Label>
-                  <Input
-                    defaultValue={project.ai_remote_endpoint ?? ""}
-                    placeholder="https://openrouter.ai/api/v1"
-                    className="h-8 text-xs"
-                    onBlur={(e) =>
-                      aiMut.mutate({
-                        runtime: "remote",
-                        remoteEndpoint: e.target.value.trim() || null,
-                        remoteModel: project.ai_remote_model,
-                        ondeviceModel: project.ai_ondevice_model,
-                      })
-                    }
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Default Model</Label>
-                  <Input
-                    defaultValue={project.ai_remote_model ?? ""}
-                    placeholder="e.g. meta-llama/llama-3.1-8b-instruct"
-                    className="h-8 text-xs"
-                    onBlur={(e) =>
-                      aiMut.mutate({
-                        runtime: "remote",
-                        remoteEndpoint: project.ai_remote_endpoint,
-                        remoteModel: e.target.value.trim() || null,
-                        ondeviceModel: project.ai_ondevice_model,
-                      })
-                    }
-                  />
-                </div>
-              </div>
-            )}
-
-            {project.ai_runtime === "on-device" && (
-              <div className="space-y-2 pt-2 border-t">
-                <Label className="text-xs">Expected Model Filename</Label>
-                <Input
-                  defaultValue={project.ai_ondevice_model ?? "model.gguf"}
-                  placeholder="model.gguf"
-                  className="h-8 text-xs"
-                  onBlur={(e) =>
-                    aiMut.mutate({
-                      runtime: "on-device",
-                      remoteEndpoint: project.ai_remote_endpoint,
-                      remoteModel: project.ai_remote_model,
-                      ondeviceModel: e.target.value.trim() || null,
-                    })
-                  }
-                />
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  Use the "Export APK bundle" button under the Export tab. Drop your .gguf
-                  into <code>android/app/src/main/assets/models/</code> and build in
-                  Android Studio.
-                </p>
-              </div>
-            )}
-          </TabsContent>
-
-          {/* HISTORY TAB - Previous Versions */}
           <TabsContent value="versions" className="flex-1 overflow-y-auto space-y-2 mt-3 pr-1">
             <div className="text-xs font-semibold text-muted-foreground px-1 pb-1">Restore Previous Versions</div>
             {data.versions.map((v) => (
@@ -442,25 +269,17 @@ function Editor() {
             ))}
           </TabsContent>
 
-          {/* EXPORT TAB */}
           <TabsContent value="export" className="flex-1 flex flex-col min-h-0 mt-3 overflow-hidden">
-            <ExportTab
-              projectId={project.id}
-              publishedUrl={publishedUrl}
-              isPublished={project.is_published}
-            />
+            <ExportTab projectId={project.id} />
           </TabsContent>
-
         </Tabs>
       </aside>
 
-      {/* RIGHT SIDE: Preview (The "Source of Truth") */}
       <main className="flex-1 flex flex-col bg-muted/20 overflow-auto justify-center items-center p-4">
         <div
           className="overflow-hidden rounded-[2.25rem] border-8 border-foreground/90 shadow-2xl relative"
           style={{ width: 360, height: 720, background: "#000" }}
         >
-          {/* Audio receiver hole */}
           <div className="absolute top-3 left-1/2 transform -translate-x-1/2 w-20 h-4 bg-foreground/90 rounded-full z-10" />
           <PreviewIframe
             key={`${project.id}-${data.tabs.length}-${JSON.stringify(project.theme)}`}
