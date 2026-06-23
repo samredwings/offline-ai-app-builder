@@ -1,12 +1,17 @@
 import { createFileRoute, Link, useNavigate, redirect } from "@tanstack/react-router";
 import { useState } from "react";
-import { lovable } from "@/integrations/lovable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { getStableSession } from "@/lib/auth-session";
 import { supabase } from "@/integrations/supabase/client";
+
+const USERNAME_EMAIL_DOMAIN = "user.appforge.local";
+
+function usernameToEmail(username: string) {
+  return `${username.trim().toLowerCase()}@${USERNAME_EMAIL_DOMAIN}`;
+}
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
