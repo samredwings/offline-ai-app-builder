@@ -1,12 +1,17 @@
 import { createFileRoute, Link, useNavigate, redirect } from "@tanstack/react-router";
 import { useState } from "react";
-import { lovable } from "@/integrations/lovable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { getStableSession } from "@/lib/auth-session";
 import { supabase } from "@/integrations/supabase/client";
+
+const USERNAME_EMAIL_DOMAIN = "user.appforge.local";
+
+function usernameToEmail(username: string) {
+  return `${username.trim().toLowerCase()}@${USERNAME_EMAIL_DOMAIN}`;
+}
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -27,17 +32,26 @@ export const Route = createFileRoute("/auth")({
 function AuthPage() {
   const navigate = useNavigate();
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-
-  async function handleEmail(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const trimmed = username.trim().toLowerCase();
+    if (!/^[a-z0-9_]{3,32}$/.test(trimmed)) {
+      toast.error("Username must be 3–32 chars: letters, numbers, underscore.");
+      return;
+    }
     setBusy(true);
     try {
+      const email = usernameToEmail(trimmed);
       if (mode === "sign-up") {
-        const { error } = await supabase.auth.signUp({ email, password });
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { username: trimmed } },
+        });
         if (error) throw error;
         toast.success("Account created.");
       } else {
@@ -52,20 +66,6 @@ function AuthPage() {
     }
   }
 
-  async function handleGoogle() {
-    setBusy(true);
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: window.location.origin + "/dashboard",
-    });
-    if (result.error) {
-      toast.error(result.error.message ?? "Google sign-in failed");
-      setBusy(false);
-      return;
-    }
-    if (result.redirected) return;
-    navigate({ to: "/dashboard" });
-  }
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
@@ -76,18 +76,25 @@ function AuthPage() {
           {mode === "sign-in" ? "Welcome back" : "Create your account"}
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          {mode === "sign-in" ? "Sign in to keep building." : "Start building apps in minutes."}
+          {mode === "sign-in" ? "Sign in to keep building." : "Pick a username and password."}
         </p>
 
-        <form onSubmit={handleEmail} className="mt-8 space-y-4">
+        <form onSubmit={handleSubmit} className="mt-8 space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="username">Username</Label>
             <Input
-              id="email"
-              type="email"
+              id="username"
+              type="text"
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              minLength={3}
+              maxLength={32}
+              pattern="[A-Za-z0-9_]{3,32}"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
             />
           </div>
           <div className="space-y-2">
@@ -95,6 +102,7 @@ function AuthPage() {
             <Input
               id="password"
               type="password"
+              autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
               required
               minLength={8}
               value={password}
@@ -105,16 +113,6 @@ function AuthPage() {
             {mode === "sign-in" ? "Sign in" : "Sign up"}
           </Button>
         </form>
-
-        <div className="my-6 flex items-center gap-3 text-xs text-muted-foreground">
-          <div className="h-px flex-1 bg-border" />
-          OR
-          <div className="h-px flex-1 bg-border" />
-        </div>
-
-        <Button variant="outline" className="w-full" onClick={handleGoogle} disabled={busy}>
-          Continue with Google
-        </Button>
 
         <p className="mt-6 text-center text-sm text-muted-foreground">
           {mode === "sign-in" ? "No account? " : "Already have one? "}
